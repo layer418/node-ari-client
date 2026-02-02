@@ -61,12 +61,11 @@ module.exports = function(grunt) {
     var done = this.async();
     var options = this.options({});
 
-    var swagger = require('swagger-client');
+    var swagger = require('./lib/swagger-client.js');
     var url = require('url');
     var util = require('util');
     var fs = require('fs');
     var mustache = require('mustache');
-    var _ = require('lodash');
     var resourcesLib = require('./lib/resources.js');
 
     var operations = '';
@@ -82,14 +81,6 @@ module.exports = function(grunt) {
     );
 
     var parsedUrl = url.parse(options.baseUrl);
-    swagger.authorizations.add(
-      'basic-auth',
-      new swagger.PasswordAuthorization(
-        parsedUrl.hostname,
-        options.username,
-        options.password
-      )
-    );
 
     // Connect to API using swagger and attach resources on Client instance
     var resourcesUrl = util.format(
@@ -99,6 +90,10 @@ module.exports = function(grunt) {
     );
     var swaggerClient = new swagger.SwaggerApi({
       url: resourcesUrl,
+      auth: {
+        user: options.username,
+        pass: options.password
+      },
       success: swaggerLoaded,
       failure: swaggerFailed
     });
@@ -108,13 +103,13 @@ module.exports = function(grunt) {
       if(swaggerClient.ready === true) {
         grunt.log.writeln('generating operations documentation');
 
-        var apis = _.sortBy(_.keys(swaggerClient.apis));
-        _.each(apis, generateOperations);
+        var apis = Object.keys(swaggerClient.apis).sort();
+        apis.forEach(generateOperations);
 
         grunt.log.writeln('generating events documentation');
 
-        var models = _.sortBy(_.keys(swaggerClient.apis.events.models));
-        _.each(models, generateEvents);
+        var models = Object.keys(swaggerClient.apis.events.models).sort();
+        models.forEach(generateEvents);
 
         var template = fs.readFileSync('./dev/README.mustache', 'utf-8');
         var output = mustache.render(template, {
@@ -138,9 +133,9 @@ module.exports = function(grunt) {
       if (resource !== 'events') {
         operations += util.format('#### %s\n\n', resource);
         var api = swaggerClient.apis[resource];
-        var ops = _.sortBy(_.keys(api.operations));
+        var ops = Object.keys(api.operations).sort();
 
-        _.each(ops, function (name) {
+        ops.forEach(function (name) {
           var operation = api.operations[name];
           var results = '';
           if (operation.type !== null) {
@@ -159,8 +154,10 @@ module.exports = function(grunt) {
           var paramsPromises = '';
           var requiredParams = [];
           var availableParams = [];
-          var parameters = _.sortBy(operation.parameters, 'name');
-          _.each(parameters, function (param) {
+          var parameters = operation.parameters.slice().sort(function(a, b) {
+            return a.name.localeCompare(b.name);
+          });
+          parameters.forEach(function (param) {
             if (param.required) {
               requiredParams.push(
                 util.format('%s: val', param.name)
@@ -212,12 +209,14 @@ module.exports = function(grunt) {
       if (name !== 'Event' && name !== 'Message') {
         var event = swaggerClient.apis.events.models[name];
         var results = '';
-        var props = _.sortBy(event.properties, 'name');
+        var props = Object.keys(event.properties || {}).sort().map(function(key) {
+          return event.properties[key];
+        });
 
         var availableProps = [];
         var promoted = [];
         var instances = [];
-        _.each(props, function (prop) {
+        props.forEach(function (prop) {
           var propType = prop.dataType;
           var regexArr =
             resourcesLib.swaggerListTypeRegex.exec(propType);
@@ -226,9 +225,9 @@ module.exports = function(grunt) {
             propType = util.format('%s', regexArr[1]);
           }
 
-          if (_.includes(resourcesLib.knownTypes, propType)) {
+          if (resourcesLib.knownTypes.includes(propType)) {
             promoted.push(prop.name);
-            if (!_.includes(instances, propType)) {
+            if (!instances.includes(propType)) {
               instances.push(propType);
             }
           }
@@ -280,10 +279,9 @@ module.exports = function(grunt) {
     var taskDone = this.async();
     var options = this.options({});
 
-    var request = require('request');
+    var http = require('./lib/http.js');
     var fs = require('fs');
     var util = require('util');
-    var async = require('async');
 
     var fixtures = [
       'resources',
@@ -300,8 +298,20 @@ module.exports = function(grunt) {
       'applications',
     ];
 
+    var pending = fixtures.length;
+
     // generate all fixtures in parallel
-    async.each(fixtures, loadFixtureJson, taskDone);
+    fixtures.forEach(function(fixtureName) {
+      loadFixtureJson(fixtureName, function(err) {
+        if (err) {
+          grunt.log.error(err);
+        }
+        pending--;
+        if (pending === 0) {
+          taskDone();
+        }
+      });
+    });
 
     // loads a given fixture from an ARI definition json file
     function loadFixtureJson (fixtureName, done) {
@@ -310,23 +320,24 @@ module.exports = function(grunt) {
       );
 
       var url = util.format(
-        '%s/ari/api-docs/%s.json?api_key=%s:%s',
+        '%s/ari/api-docs/%s.json',
         options.baseUrl,
-        fixtureName,
-        options.username,
-        options.password
+        fixtureName
       );
-      request(url, function (err, resp, body) {
-        var filename = util.format(
-          '%s/test/fixtures/%s.json',
-          __dirname,
-          fixtureName
-        );
-        var content = body.replace(/ari\.js/g, 'localhost');
-        fs.writeFileSync(filename, content);
-
-        done();
-      });
+      http.get(url, {user: options.username, pass: options.password})
+        .then(function(response) {
+          var filename = util.format(
+            '%s/test/fixtures/%s.json',
+            __dirname,
+            fixtureName
+          );
+          var content = response.data.toString('utf-8').replace(/ari\.js/g, 'localhost');
+          fs.writeFileSync(filename, content);
+          done();
+        })
+        .catch(function(err) {
+          done(err);
+        });
     }
   });
 };
